@@ -66,15 +66,21 @@ class WhatsAppTemplates(Document):
                             title=_("Sample Values Mismatch")
                         )
 
-        # Only update template if it's already been created (has an ID)
-        # Don't update during initial save to avoid errors
+        # Only update template if it's already been created (has an ID) and status allows updates
+        # WhatsApp templates in PENDING/APPROVED status typically cannot be updated
+        # Only update if status is not set or is in a state that allows updates
         if not self.is_new() and self.id:
-            try:
-                self.update_template()
-            except Exception as e:
-                # Log the error but don't block saving if update fails
-                frappe.log_error(f"Failed to update WhatsApp template: {str(e)}", "WhatsApp Template Update")
-                # Don't raise - allow the document to save even if update fails
+            # Skip update if template is already submitted/approved (WhatsApp doesn't allow updates)
+            if self.status and self.status.upper() in ["PENDING", "APPROVED", "REJECTED"]:
+                # Don't attempt to update - WhatsApp doesn't allow modifying submitted templates
+                pass
+            else:
+                try:
+                    self.update_template()
+                except Exception as e:
+                    # Log the error but don't block saving if update fails
+                    frappe.log_error(f"Failed to update WhatsApp template: {str(e)}", "WhatsApp Template Update")
+                    # Don't raise - allow the document to save even if update fails
 
     def sanitize_template_name(self, name):
         """Sanitize template name to only contain lowercase letters, numbers, and underscores."""
@@ -315,6 +321,8 @@ class WhatsAppTemplates(Document):
 
         try:
             # Update template - WhatsApp API requires business_id in the URL
+            # Note: WhatsApp typically doesn't allow updating templates once they're submitted
+            # This will only work for templates that haven't been submitted yet
             make_post_request(
                 f"{self._url}/{self._version}/{self._business_id}/{self.id}",
                 headers=self._headers,
@@ -327,21 +335,46 @@ class WhatsAppTemplates(Document):
                     res = frappe.flags.integration_request.json().get("error", {})
                     error_message = res.get("error_user_msg", res.get("message", str(e)))
                     error_title = res.get("error_user_title", "Error")
-                    frappe.throw(
-                        msg=error_message,
-                        title=error_title,
-                    )
+                    
+                    # If error indicates template can't be updated, provide helpful message
+                    if "cannot be updated" in error_message.lower() or "not allowed" in error_message.lower():
+                        frappe.throw(
+                            _("WhatsApp templates cannot be updated once they are submitted (PENDING/APPROVED status). "
+                              "You can only edit the template locally. To make changes, you may need to create a new template version."),
+                            title=_("Template Update Not Allowed")
+                        )
+                    else:
+                        frappe.throw(
+                            msg=error_message,
+                            title=error_title,
+                        )
                 except Exception:
-                    # If we can't parse the error, throw the original exception
+                    # If we can't parse the error, check if it's a 400 error which might indicate update not allowed
+                    if "400" in str(e) or "Bad Request" in str(e):
+                        frappe.throw(
+                            _("WhatsApp templates cannot be updated once they are submitted. "
+                              "The template status is '{0}'. You can only edit the template locally. "
+                              "To make changes, you may need to create a new template version.").format(self.status or "PENDING"),
+                            title=_("Template Update Not Allowed")
+                        )
+                    else:
+                        frappe.throw(
+                            _("Failed to update WhatsApp template: {0}").format(str(e)),
+                            title=_("Template Update Error")
+                        )
+            else:
+                # If it's a 400 error, likely means update not allowed
+                if "400" in str(e) or "Bad Request" in str(e):
+                    frappe.throw(
+                        _("WhatsApp templates cannot be updated once they are submitted. "
+                          "The template status is '{0}'. You can only edit the template locally.").format(self.status or "PENDING"),
+                        title=_("Template Update Not Allowed")
+                    )
+                else:
                     frappe.throw(
                         _("Failed to update WhatsApp template: {0}").format(str(e)),
                         title=_("Template Update Error")
                     )
-            else:
-                frappe.throw(
-                    _("Failed to update WhatsApp template: {0}").format(str(e)),
-                    title=_("Template Update Error")
-                )
             # res = frappe.flags.integration_request.json()['error']
             # frappe.throw(
             #     msg=res.get('error_user_msg', res.get("message")),
@@ -398,6 +431,73 @@ class WhatsAppTemplates(Document):
         return header
 
 @frappe.whitelist()
+def sync_template_status(template_name):
+    """Sync status of a single template from WhatsApp API."""
+    try:
+        doc = frappe.get_doc("WhatsApp Templates", template_name)
+        
+        if not doc.id:
+            frappe.throw(_("Template ID is missing. Cannot sync status."))
+        
+        if not doc.whatsapp_account:
+            frappe.throw(_("WhatsApp Account is not set for this template."))
+        
+        # Get settings
+        settings = frappe.get_doc("WhatsApp Account", doc.whatsapp_account)
+        token = settings.get_password("token")
+        url = settings.url
+        version = settings.version
+        business_id = settings.business_id
+        
+        headers = {
+            "authorization": f"Bearer {token}",
+            "content-type": "application/json"
+        }
+        
+        # Fetch template from WhatsApp API
+        response = make_request(
+            "GET",
+            f"{url}/{version}/{business_id}/message_templates?name={doc.actual_name}",
+            headers=headers,
+        )
+        
+        # Find matching template
+        template_found = None
+        for template in response.get("data", []):
+            if template.get("id") == doc.id or template.get("name") == doc.actual_name:
+                template_found = template
+                break
+        
+        if not template_found:
+            frappe.throw(_("Template not found in WhatsApp API. It may have been deleted."))
+        
+        # Update status
+        old_status = doc.status
+        new_status = template_found.get("status", "PENDING")
+        
+        doc.status = new_status
+        doc.save(ignore_permissions=True)
+        
+        frappe.db.commit()
+        
+        if old_status != new_status:
+            return {
+                "message": _("Template status updated from '{0}' to '{1}'").format(old_status, new_status),
+                "old_status": old_status,
+                "new_status": new_status
+            }
+        else:
+            return {
+                "message": _("Template status is already '{0}'").format(new_status),
+                "old_status": old_status,
+                "new_status": new_status
+            }
+            
+    except Exception as e:
+        frappe.log_error(f"Error syncing template status: {str(e)}", "WhatsApp Template Sync")
+        frappe.throw(_("Failed to sync template status: {0}").format(str(e)))
+
+@frappe.whitelist()
 def fetch():
     """Fetch templates from meta."""
     """Later improve this code to pass a whatsapp account remove the js funcation so that it is called from whatsapp account doctype """
@@ -420,16 +520,22 @@ def fetch():
             )
 
             for template in response["data"]:
-                # set flag to insert or update
-                flags = 1
-                if frappe.db.exists("WhatsApp Templates", {"actual_name": template["name"]}):
-                    doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template["name"]})
+                # Find existing template by actual_name or id
+                existing_template = frappe.db.get_value(
+                    "WhatsApp Templates",
+                    filters={"actual_name": template["name"]},
+                    fieldname="name"
+                )
+                
+                if existing_template:
+                    doc = frappe.get_doc("WhatsApp Templates", existing_template)
                 else:
-                    flags = 0
                     doc = frappe.new_doc("WhatsApp Templates")
                     doc.template_name = template["name"]
                     doc.actual_name = template["name"]
 
+                # Update status and other fields
+                old_status = doc.status
                 doc.status = template["status"]
                 doc.language_code = template["language"]
                 doc.category = template["category"]

@@ -13,6 +13,28 @@ from frappe.utils import add_to_date, nowdate, datetime
 from frappe_whatsapp.utils import get_whatsapp_account
 
 
+def sanitize_whatsapp_param(value):
+    """
+    Sanitize text for WhatsApp template parameters.
+    WhatsApp API rejects: newlines, tabs, more than 4 consecutive spaces, empty strings.
+    """
+    import re
+    if value in (None, ""):
+        return "-"
+    
+    text = str(value)
+    # Replace newlines and tabs with single space
+    text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    # Collapse multiple spaces to max 4 consecutive spaces
+    text = re.sub(r' {5,}', '    ', text)
+    # Strip leading/trailing whitespace
+    text = text.strip()
+    
+    if not text:
+        return "-"
+    return text
+
+
 class WhatsAppNotification(Document):
     """Notification."""
 
@@ -30,7 +52,21 @@ class WhatsAppNotification(Document):
                 
             if isinstance(value, Document):
                 if hasattr(value, part):
+                    # Try get() first (for regular fields)
                     link_value = value.get(part)
+                    
+                    # If get() returns None and it's not a field, try getattr() for properties
+                    if link_value is None:
+                        try:
+                            meta = frappe.get_meta(value.doctype)
+                            df = meta.get_field(part)
+                            # If it's not a field in meta, it might be a property
+                            if not df:
+                                link_value = getattr(value, part, None)
+                        except Exception:
+                            # Fallback: try getattr if get() returned None
+                            link_value = getattr(value, part, None)
+                    
                     # Check if this is a Link field pointing to another doctype
                     try:
                         meta = frappe.get_meta(value.doctype)
@@ -172,7 +208,7 @@ class WhatsAppNotification(Document):
                     param_values = _locals.get("result", [])
                     if not isinstance(param_values, list):
                         frappe.throw(_("Template Data Script must set 'result' as a list of values"))
-                    parameters = [{"type": "text", "text": str(v).rstrip('\n\r') if v is not None else ""} for v in param_values]
+                    parameters = [{"type": "text", "text": sanitize_whatsapp_param(v)} for v in param_values]
                 except Exception as e:
                     frappe.log_error(f"Error in template_data_script: {str(e)}", "WhatsApp Notification")
                     frappe.throw(_("Error in Template Data Script: {0}").format(str(e)))
@@ -211,20 +247,15 @@ class WhatsAppNotification(Document):
                                 except Exception:
                                     pass
                         
-                        # Strip trailing newlines and whitespace from value
-                        if value is not None:
-                            text_value = str(value).rstrip('\n\r').rstrip()
-                        else:
-                            text_value = ""
                         parameters.append({
                             "type": "text",
-                            "text": text_value
+                            "text": sanitize_whatsapp_param(value)
                         })
                     except Exception as e:
                         frappe.log_error(f"Error processing field {getattr(field, 'field_name', 'unknown')}: {str(e)}", "WhatsApp Notification")
                         parameters.append({
                             "type": "text",
-                            "text": ""
+                            "text": "-"
                         })
 
             if parameters:
