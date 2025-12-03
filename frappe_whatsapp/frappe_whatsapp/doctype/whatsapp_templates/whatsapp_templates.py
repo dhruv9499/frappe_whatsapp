@@ -46,15 +46,35 @@ class WhatsAppTemplates(Document):
         # Check if template has parameters and validate sample_values
         if self.template:
             param_count = self.get_parameter_count()
-            if param_count > 0 and not self.sample_values:
-                frappe.throw(
-                    _("Sample Values is required when template has parameters ({{1}}, {{2}}, etc.). "
-                      "Please provide {0} comma-separated sample values matching your {0} parameters.").format(param_count),
-                    title=_("Sample Values Required")
-                )
+            if param_count > 0:
+                if not self.sample_values:
+                    frappe.throw(
+                        _("Sample Values is required when template has parameters ({{1}}, {{2}}, etc.). "
+                          "Please provide {0} comma-separated sample values matching your {0} parameters.").format(param_count),
+                        title=_("Sample Values Required")
+                    )
+                else:
+                    # Validate that sample_values count matches parameter count
+                    sample_list = [s.strip() for s in self.sample_values.split(",") if s.strip()]
+                    if len(sample_list) != param_count:
+                        frappe.throw(
+                            _("Sample Values count ({0}) does not match template parameter count ({1}). "
+                              "Please provide exactly {1} comma-separated values. "
+                              "Note: If your dates contain commas (e.g., 'Jan 15, 2024'), consider using a different format or separator.").format(
+                                len(sample_list), param_count
+                            ),
+                            title=_("Sample Values Mismatch")
+                        )
 
-        if not self.is_new():
-            self.update_template()
+        # Only update template if it's already been created (has an ID)
+        # Don't update during initial save to avoid errors
+        if not self.is_new() and self.id:
+            try:
+                self.update_template()
+            except Exception as e:
+                # Log the error but don't block saving if update fails
+                frappe.log_error(f"Failed to update WhatsApp template: {str(e)}", "WhatsApp Template Update")
+                # Don't raise - allow the document to save even if update fails
 
     def sanitize_template_name(self, name):
         """Sanitize template name to only contain lowercase letters, numbers, and underscores."""
@@ -162,19 +182,30 @@ class WhatsAppTemplates(Document):
             "components": [],
         }
 
+        # Normalize newlines: convert \r\n to \n, remove trailing newlines
+        template_text = self.template.replace('\r\n', '\n').replace('\r', '\n') if self.template else ""
+        template_text = template_text.rstrip('\n\r')
+        
         body = {
             "type": "BODY",
-            "text": self.template,
+            "text": template_text,
         }
         # WhatsApp API requires example field when template has parameters
         param_count = self.get_parameter_count()
         if param_count > 0:
             if self.sample_values:
-                sample_list = [s.strip() for s in self.sample_values.split(",")]
-                # Ensure we have enough sample values
-                while len(sample_list) < param_count:
-                    sample_list.append("Sample")
-                body.update({"example": {"body_text": [sample_list[:param_count]]}})
+                # Split by comma and strip whitespace, filter out empty values
+                sample_list = [s.strip() for s in self.sample_values.split(",") if s.strip()]
+                # Validation should have caught count mismatch, but double-check here
+                if len(sample_list) != param_count:
+                    frappe.throw(
+                        _("Sample Values count ({0}) does not match template parameter count ({1}). "
+                          "Please provide exactly {1} comma-separated values.").format(
+                            len(sample_list), param_count
+                        ),
+                        title=_("Sample Values Mismatch")
+                    )
+                body.update({"example": {"body_text": [sample_list]}})
             else:
                 # Auto-generate sample values if missing (shouldn't happen due to validation)
                 sample_list = [f"Sample {i}" for i in range(1, param_count + 1)]
@@ -231,19 +262,28 @@ class WhatsAppTemplates(Document):
         self.get_settings()
         data = {"components": []}
 
+        # Normalize newlines: convert \r\n to \n, remove trailing newlines
+        template_text = self.template.replace('\r\n', '\n').replace('\r', '\n') if self.template else ""
+        template_text = template_text.rstrip('\n\r')
+        
         body = {
             "type": "BODY",
-            "text": self.template,
+            "text": template_text,
         }
         # WhatsApp API requires example field when template has parameters
         param_count = self.get_parameter_count()
         if param_count > 0:
             if self.sample_values:
-                sample_list = [s.strip() for s in self.sample_values.split(",")]
-                # Ensure we have enough sample values
-                while len(sample_list) < param_count:
-                    sample_list.append("Sample")
-                body.update({"example": {"body_text": [sample_list[:param_count]]}})
+                # Split by comma and strip whitespace, filter out empty values
+                sample_list = [s.strip() for s in self.sample_values.split(",") if s.strip()]
+                # Ensure we have exactly the right number of sample values
+                if len(sample_list) < param_count:
+                    # Pad with "Sample" if not enough values
+                    sample_list.extend(["Sample"] * (param_count - len(sample_list)))
+                elif len(sample_list) > param_count:
+                    # Truncate if too many values
+                    sample_list = sample_list[:param_count]
+                body.update({"example": {"body_text": [sample_list]}})
             else:
                 # Auto-generate sample values if missing (shouldn't happen due to validation)
                 sample_list = [f"Sample {i}" for i in range(1, param_count + 1)]
@@ -274,14 +314,34 @@ class WhatsAppTemplates(Document):
             data["components"].append(button_block)
 
         try:
-            # post template to meta for update
+            # Update template - WhatsApp API requires business_id in the URL
             make_post_request(
-                f"{self._url}/{self._version}/{self.id}",
+                f"{self._url}/{self._version}/{self._business_id}/{self.id}",
                 headers=self._headers,
                 data=json.dumps(data),
             )
         except Exception as e:
-            raise e
+            # Extract error message from API response
+            if hasattr(frappe.flags, 'integration_request') and frappe.flags.integration_request:
+                try:
+                    res = frappe.flags.integration_request.json().get("error", {})
+                    error_message = res.get("error_user_msg", res.get("message", str(e)))
+                    error_title = res.get("error_user_title", "Error")
+                    frappe.throw(
+                        msg=error_message,
+                        title=error_title,
+                    )
+                except Exception:
+                    # If we can't parse the error, throw the original exception
+                    frappe.throw(
+                        _("Failed to update WhatsApp template: {0}").format(str(e)),
+                        title=_("Template Update Error")
+                    )
+            else:
+                frappe.throw(
+                    _("Failed to update WhatsApp template: {0}").format(str(e)),
+                    title=_("Template Update Error")
+                )
             # res = frappe.flags.integration_request.json()['error']
             # frappe.throw(
             #     msg=res.get('error_user_msg', res.get("message")),
