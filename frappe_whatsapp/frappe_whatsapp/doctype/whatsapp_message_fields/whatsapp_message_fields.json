@@ -6,14 +6,31 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "field_name"
+  "field_type",
+  "field_name",
+  "expression"
  ],
  "fields": [
   {
+   "default": "Field",
+   "fieldname": "field_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Field Type",
+   "options": "Field\nExpression"
+  },
+  {
+   "depends_on": "eval:doc.field_type == \"Field\"",
    "fieldname": "field_name",
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Field name"
+  },
+  {
+   "depends_on": "eval:doc.field_type == \"Expression\"",
+   "fieldname": "expression",
+   "fieldtype": "Small Text",
+   "label": "Python Expression"
   }
  ],
  "index_web_pages_for_search": 1,

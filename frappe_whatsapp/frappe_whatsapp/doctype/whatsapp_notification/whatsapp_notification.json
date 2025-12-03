@@ -28,6 +28,7 @@
   "condition",
   "column_break_12",
   "fields",
+  "template_data_script",
   "button_fields",
   "property_section",
   "set_property_after_alert",
@@ -79,7 +80,7 @@
   {
    "fieldname": "help_html",
    "fieldtype": "HTML",
-   "options": "<pre><code>doc.grand_total &gt; 0</code></pre>\n\n<p>Conditions should be written in simple Python. Please use properties available in the form only.</p>\n\n<p>Example: </p><pre><code>doc.status=='Enabled' </code></pre><p></p>\n\n<p> For scheduler events you can use follwing methods</p>\n<p>Allowed functions: </p><ul>\n<li>frappe.db.get_value</li>\n<li>frappe.db.get_list</li>\n<li>frappe.session</li>\n<li>frappe.utils.now_datetime</li>\n<li>frappe.utils.get_datetime</li>\n<li>frappe.utils.add_to_date</li>\n<li>frappe.utils.now</li>\n</ul>\n<p>Example: </p><pre><code>doc.creation &gt; frappe.utils.add_to_date(frappe.utils.now_datetime(\n), days=-5, as_string=True, as_datetime=True) </code></pre><p></p>\n\n<p>\n\t<strong>For scheduled events, use </strong>\n<br>\n1. Simple template sending, without parameters, just send a template\n</p><pre><code class=\"language-python\">\ndoc.set(\"_contact_list\", [\"919123456789\"])\n</code>\n</pre>\n\n2. Message based on doctype with parameters\n<pre><code class=\"language-python\">\nquotation_list = frappe.get_list(\"Quotation\", {\"name\": \"VEN-COT-24-29806\", \"custom_whatsapp_notify\": 0})\nfor qo in quotation_list:\n\tdata_list.append({\n\t\t\"name\": qo.name,\n\t\t\"phone_no\": \"5548996436821\",\n\t})\ndoc.set(\"_data_list\", data_list)\n</code>\n</pre>\n\n<p></p> "
+   "options": "<pre><code>doc.grand_total &gt; 0</code></pre>\n\n<p>Conditions should be written in simple Python. Please use properties available in the form only.</p>\n\n<p>Example: </p><pre><code>doc.status=='Enabled' </code></pre><p></p>\n\n<p> For scheduler events you can use follwing methods</p>\n<p>Allowed functions: </p><ul>\n<li>frappe.db.get_value</li>\n<li>frappe.db.get_list</li>\n<li>frappe.session</li>\n<li>frappe.utils.now_datetime</li>\n<li>frappe.utils.get_datetime</li>\n<li>frappe.utils.add_to_date</li>\n<li>frappe.utils.now</li>\n</ul>\n<p>Example: </p><pre><code>doc.creation &gt; frappe.utils.add_to_date(frappe.utils.now_datetime(\n), days=-5, as_string=True, as_datetime=True) </code></pre><p></p>\n\n<p>\n\t<strong>For scheduled events, use </strong>\n<br>\n1. Simple template sending, without parameters, just send a template\n</p><pre><code class=\"language-python\">\ndoc.set(\"_contact_list\", [\"919123456789\"])\n</code>\n</pre>\n\n2. Message based on doctype with parameters\n<pre><code class=\"language-python\">\nquotation_list = frappe.get_list(\"Quotation\", {\"name\": \"VEN-COT-24-29806\", \"custom_whatsapp_notify\": 0})\nfor qo in quotation_list:\n\tdata_list.append({\n\t\t\"name\": qo.name,\n\t\t\"phone_no\": \"5548996436821\",\n\t})\ndoc.set(\"_data_list\", data_list)\n</code>\n</pre>\n\n<p></p>\n\n<p><strong>Mobile Number Field (Field Name):</strong></p>\n<p>Supports dotted paths to traverse linked doctypes. Example:</p>\n<ul>\n<li><code>mobile_no</code> - Direct field on reference doctype</li>\n<li><code>user.mobile_no</code> - Field from linked User doctype</li>\n<li><code>customer.contact_mobile</code> - Field from linked Customer doctype</li>\n</ul>\n\n<p><strong>Template Parameters (Fields Table):</strong></p>\n<p>Each field row can be either:</p>\n<ul>\n<li><strong>Field Type:</strong> Use dotted path like <code>lms_batch.title</code> or <code>user.full_name</code></li>\n<li><strong>Expression Type:</strong> Use Python expression like <code>frappe.utils.format_date(doc.start_date, \"medium\")</code></li>\n</ul>\n\n<p>Example Fields Table:</p>\n<table border=\"1\" style=\"border-collapse: collapse; width: 100%;\">\n<tr><th>Field Type</th><th>Field Name</th><th>Expression</th></tr>\n<tr><td>Field</td><td>trainee_full_name</td><td></td></tr>\n<tr><td>Field</td><td>lms_batch.title</td><td></td></tr>\n<tr><td>Expression</td><td></td><td>frappe.utils.format_date(doc.lms_batch.start_date, \"medium\")</td></tr>\n</table>\n\n<p><strong>Template Data Script (Optional):</strong></p>\n<p>For complex logic, use Template Data Script to override Fields table. Must set <code>result</code> as a list of values matching template parameters in order.</p>\n<pre><code class=\"language-python\">\nbatch = frappe.get_doc(\"LMS Batch\", doc.lms_batch)\nvenue = frappe.get_doc(\"Venue\", batch.venue) if batch.venue else None\n\nresult = [\n    doc.trainee_full_name,\n    batch.title,\n    frappe.utils.format_date(batch.start_date, \"medium\"),\n    frappe.utils.format_date(batch.end_date, \"medium\"),\n    frappe.utils.format_time(batch.start_time, \"short\"),\n    frappe.utils.format_time(batch.end_time, \"short\"),\n    batch.timezone or \"Asia/Singapore\",\n    venue.venue_name_display if venue else \"\",\n    venue.address if venue else \"\"\n]\n</code></pre> "
   },
   {
    "fieldname": "notification_type",
@@ -120,6 +121,13 @@
    "fieldtype": "Table",
    "label": "Fields",
    "options": "WhatsApp Message Fields"
+  },
+  {
+   "description": "Optional Python script that returns a list of parameter values. If set, this overrides the Fields table. The script should set a variable 'result' as a list of values matching template parameters in order.",
+   "fieldname": "template_data_script",
+   "fieldtype": "Code",
+   "label": "Template Data Script",
+   "options": "Python"
   },
   {
    "fieldname": "section_break_11",

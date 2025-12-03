@@ -16,17 +16,53 @@ from frappe_whatsapp.utils import get_whatsapp_account
 class WhatsAppNotification(Document):
     """Notification."""
 
+    def get_value_from_path(self, doc, path):
+        """Resolve dotted path like 'user.mobile_no' from doc."""
+        if not path:
+            return None
+        
+        parts = path.split(".")
+        value = doc
+        
+        for part in parts:
+            if value is None:
+                return None
+                
+            if isinstance(value, Document):
+                if hasattr(value, part):
+                    link_value = value.get(part)
+                    # Check if this is a Link field pointing to another doctype
+                    try:
+                        meta = frappe.get_meta(value.doctype)
+                        df = meta.get_field(part)
+                        if df and df.fieldtype == "Link" and link_value:
+                            value = frappe.get_doc(df.options, link_value)
+                        else:
+                            value = link_value
+                    except Exception:
+                        value = link_value
+                else:
+                    return None
+            elif isinstance(value, dict):
+                value = value.get(part)
+            else:
+                return None
+                
+        return value
+
     def validate(self):
         """Validate."""
-        if self.notification_type == "DocType Event":
+        if self.notification_type == "DocType Event" and self.field_name:
+            # For dotted paths, only validate the first part exists as a field
+            first_field = self.field_name.split(".")[0]
             fields = frappe.get_doc("DocType", self.reference_doctype).fields
             fields += frappe.get_all(
                 "Custom Field",
                 filters={"dt": self.reference_doctype},
                 fields=["fieldname"]
             )
-            if not any(field.fieldname == self.field_name for field in fields): # noqa
-                frappe.throw(_("Field name {0} does not exists").format(self.field_name))
+            if not any(field.fieldname == first_field for field in fields): # noqa
+                frappe.throw(_("Field name {0} does not exist on DocType {1}").format(first_field, self.reference_doctype))
         if self.custom_attachment:
             if not self.attach and not self.attach_from_field:
                 frappe.throw(_("Either {0} a file or add a {1} to send attachemt").format(
@@ -104,9 +140,15 @@ class WhatsAppNotification(Document):
 
         if template:
             if self.field_name:
-                phone_number = phone_no or doc_data[self.field_name]
+                phone_number = phone_no or self.get_value_from_path(doc, self.field_name)
+                if not phone_number:
+                    frappe.log_error(f"Could not resolve phone number from path: {self.field_name}", "WhatsApp Notification")
+                    return
+                phone_number = str(phone_number)
             else:
                 phone_number = phone_no
+                if phone_number:
+                    phone_number = str(phone_number)
 
             data = {
                 "messaging_product": "whatsapp",
@@ -122,22 +164,65 @@ class WhatsAppNotification(Document):
             }
 
             # Pass parameter values
-            if self.fields:
+            # If template_data_script is set, use it (overrides Fields table)
+            if self.template_data_script:
+                _locals = {"doc": doc, "frappe": frappe}
+                try:
+                    safe_exec(self.template_data_script, get_safe_globals(), _locals)
+                    param_values = _locals.get("result", [])
+                    if not isinstance(param_values, list):
+                        frappe.throw(_("Template Data Script must set 'result' as a list of values"))
+                    parameters = [{"type": "text", "text": str(v) if v is not None else ""} for v in param_values]
+                except Exception as e:
+                    frappe.log_error(f"Error in template_data_script: {str(e)}", "WhatsApp Notification")
+                    frappe.throw(_("Error in Template Data Script: {0}").format(str(e)))
+            elif self.fields:
                 parameters = []
                 for field in self.fields:
-                    if isinstance(doc, Document):
-                        # get field with prettier value.
-                        value = doc.get_formatted(field.field_name)
-                    else: 
-                        value = doc_data[field.field_name]
-                        if isinstance(doc_data[field.field_name], (datetime.date, datetime.datetime)):
-                            value = str(doc_data[field.field_name])
+                    try:
+                        if getattr(field, "field_type", "Field") == "Expression":
+                            # Evaluate Python expression
+                            if not getattr(field, "expression", None):
+                                frappe.throw(_("Expression is required when Field Type is 'Expression'"))
+                            value = frappe.safe_eval(
+                                field.expression,
+                                get_safe_globals(),
+                                {"doc": doc, "frappe": frappe}
+                            )
+                        else:
+                            # Use dotted path resolution
+                            field_name = getattr(field, "field_name", None)
+                            if not field_name:
+                                frappe.throw(_("Field name is required when Field Type is 'Field'"))
+                            value = self.get_value_from_path(doc, field_name)
+                            
+                            # Format dates/datetimes if needed
+                            if isinstance(value, (datetime.date, datetime.datetime)):
+                                if isinstance(doc, Document):
+                                    value = doc.get_formatted(field_name)
+                                else:
+                                    value = str(value)
+                            elif isinstance(doc, Document) and value is not None:
+                                # Try to get formatted value for other field types
+                                try:
+                                    formatted_value = doc.get_formatted(field_name)
+                                    if formatted_value:
+                                        value = formatted_value
+                                except Exception:
+                                    pass
+                        
+                        parameters.append({
+                            "type": "text",
+                            "text": str(value) if value is not None else ""
+                        })
+                    except Exception as e:
+                        frappe.log_error(f"Error processing field {getattr(field, 'field_name', 'unknown')}: {str(e)}", "WhatsApp Notification")
+                        parameters.append({
+                            "type": "text",
+                            "text": ""
+                        })
 
-                    parameters.append({
-                        "type": "text",
-                        "text": value
-                    })
-
+            if parameters:
                 data['template']["components"] = [{
                     "type": "body",
                     "parameters": parameters
