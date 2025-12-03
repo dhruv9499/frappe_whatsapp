@@ -183,27 +183,120 @@ def post():
 		changes = None
 		try:
 			changes = data["entry"][0]["changes"][0]
-		except KeyError:
-			changes = data["entry"]["changes"][0]
-		update_status(changes)
+		except (KeyError, IndexError, TypeError):
+			try:
+				changes = data["entry"]["changes"][0]
+			except (KeyError, IndexError, TypeError):
+				frappe.log_error("Webhook structure error", f"Unable to parse webhook changes. Data: {json.dumps(data)}")
+				return
+		if changes:
+			update_status(changes)
 	return
 
 def update_status(data):
 	"""Update status hook."""
-	if data.get("field") == "message_template_status_update":
-		update_template_status(data['value'])
+	if not data:
+		return
+		
+	field = data.get("field")
+	
+	# Log all status updates for debugging
+	frappe.logger().info(f"Webhook status update received - Field: {field}, Data: {json.dumps(data)}")
+	
+	if field == "message_template_status_update":
+		value = data.get('value')
+		if value:
+			frappe.logger().info(f"Processing template status update: {json.dumps(value)}")
+			update_template_status(value)
+		else:
+			frappe.log_error("Webhook template status error", f"Missing value in template status update. Data: {json.dumps(data)}")
 
-	elif data.get("field") == "messages":
-		update_message_status(data['value'])
+	elif field == "messages":
+		value = data.get('value')
+		if value:
+			update_message_status(value)
+		else:
+			frappe.log_error("Webhook message status error", f"Missing value in message status update. Data: {json.dumps(data)}")
+	else:
+		# Log unknown field types for debugging
+		frappe.logger().debug(f"Unknown webhook field: {field}. Data: {json.dumps(data)}")
 
 def update_template_status(data):
-	"""Update template status."""
-	frappe.db.sql(
-		"""UPDATE `tabWhatsApp Templates`
-		SET status = %(event)s
-		WHERE id = %(message_template_id)s""",
-		data
-	)
+	"""
+	Update template status based on Meta webhook.
+	
+	According to Meta documentation:
+	https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/message_template_status_update
+	
+	Webhook structure:
+	{
+		"event": "APPROVED" | "REJECTED" | "PENDING" | "FLAGGED" | "DISABLED",
+		"message_template_id": "123456789",
+		"message_template_name": "template_name",
+		"message_template_language": "en"
+	}
+	"""
+	try:
+		# Get event/status - Meta uses "event" field
+		event = data.get("event") or data.get("status")
+		
+		# Get template ID - Meta uses "message_template_id" field
+		message_template_id = data.get("message_template_id") or data.get("id")
+		
+		if not event:
+			frappe.log_error("Template status update error", f"Missing event/status field. Data: {json.dumps(data)}")
+			return
+			
+		if not message_template_id:
+			frappe.log_error("Template status update error", f"Missing message_template_id field. Data: {json.dumps(data)}")
+			return
+		
+		# Normalize status value (Meta sends uppercase like "APPROVED", "REJECTED")
+		# but database might store in different case
+		status = str(event).upper()
+		
+		# Check if template exists
+		template_exists = frappe.db.exists("WhatsApp Templates", {"id": message_template_id})
+		
+		if not template_exists:
+			# Try to find by actual_name as fallback
+			template_name = data.get("message_template_name")
+			if template_name:
+				template_exists = frappe.db.exists("WhatsApp Templates", {"actual_name": template_name})
+				if template_exists:
+					template_doc = frappe.get_doc("WhatsApp Templates", {"actual_name": template_name})
+					# Update the id if it was missing
+					if not template_doc.id:
+						template_doc.id = message_template_id
+						template_doc.save(ignore_permissions=True)
+					frappe.db.sql(
+						"""UPDATE `tabWhatsApp Templates`
+						SET status = %s
+						WHERE actual_name = %s""",
+						(status, template_name)
+					)
+					frappe.db.commit()
+					frappe.logger().info(f"Updated template {template_name} (id: {message_template_id}) status to {status}")
+					return
+		
+		if not template_exists:
+			frappe.log_error("Template status update error", 
+				f"Template not found. ID: {message_template_id}, Name: {data.get('message_template_name')}, Data: {json.dumps(data)}")
+			return
+		
+		# Update template status by ID
+		frappe.db.sql(
+			"""UPDATE `tabWhatsApp Templates`
+			SET status = %s
+			WHERE id = %s""",
+			(status, message_template_id)
+		)
+		frappe.db.commit()
+		
+		frappe.logger().info(f"Updated template {message_template_id} status to {status}")
+	except Exception as e:
+		frappe.log_error("Template status update error", 
+			f"Error updating template status: {str(e)}\nData: {json.dumps(data)}\nTraceback: {frappe.get_traceback()}")
 
 def update_message_status(data):
 	"""Update message status."""
