@@ -23,6 +23,22 @@ class WhatsAppTemplates(Document):
             lang_code = frappe.db.get_value("Language", self.language) or "en"
             self.language_code = lang_code.replace("-", "_")
 
+        # Sanitize and validate template name
+        if self.template_name:
+            sanitized = self.sanitize_template_name(self.template_name)
+            if sanitized != self.template_name.lower().replace(" ", "_"):
+                # Auto-sanitize the actual_name that will be used
+                if not self.actual_name or self.actual_name == self.template_name.lower().replace(" ", "_"):
+                    self.actual_name = sanitized
+            # Validate the sanitized name
+            if not re.match(r'^[a-z][a-z0-9_]*$', sanitized):
+                frappe.throw(
+                    _("Template name '{0}' contains invalid characters. "
+                      "Template names can only contain lowercase letters, numbers, and underscores, "
+                      "and must start with a letter.").format(self.template_name),
+                    title=_("Invalid Template Name")
+                )
+
         if self.header_type in ["IMAGE", "DOCUMENT"] and self.sample:
             self.get_session_id()
             self.get_media_id()
@@ -39,6 +55,28 @@ class WhatsAppTemplates(Document):
 
         if not self.is_new():
             self.update_template()
+
+    def sanitize_template_name(self, name):
+        """Sanitize template name to only contain lowercase letters, numbers, and underscores."""
+        if not name:
+            return ""
+        # Convert to lowercase
+        sanitized = name.lower()
+        # Replace spaces, hyphens, and other common separators with underscores
+        sanitized = re.sub(r'[\s\-\.]+', '_', sanitized)
+        # Remove any characters that aren't lowercase letters, numbers, or underscores
+        sanitized = re.sub(r'[^a-z0-9_]', '', sanitized)
+        # Remove consecutive underscores
+        sanitized = re.sub(r'_+', '_', sanitized)
+        # Remove leading/trailing underscores
+        sanitized = sanitized.strip('_')
+        # Ensure it doesn't start with a number (WhatsApp requirement)
+        if sanitized and sanitized[0].isdigit():
+            sanitized = '_' + sanitized
+        # Ensure it's not empty
+        if not sanitized:
+            sanitized = 'template_' + re.sub(r'[^a-z0-9]', '', name.lower())[:20]
+        return sanitized
 
     def get_parameter_count(self):
         """Count the number of parameters in the template ({{1}}, {{2}}, etc.)."""
@@ -109,7 +147,12 @@ class WhatsAppTemplates(Document):
 
     def after_insert(self):
         if self.template_name:
-            self.actual_name = self.template_name.lower().replace(" ", "_")
+            # Use sanitized name if not already set
+            if not self.actual_name:
+                self.actual_name = self.sanitize_template_name(self.template_name)
+            else:
+                # Ensure actual_name is also sanitized
+                self.actual_name = self.sanitize_template_name(self.actual_name)
 
         self.get_settings()
         data = {

@@ -172,7 +172,7 @@ class WhatsAppNotification(Document):
                     param_values = _locals.get("result", [])
                     if not isinstance(param_values, list):
                         frappe.throw(_("Template Data Script must set 'result' as a list of values"))
-                    parameters = [{"type": "text", "text": str(v) if v is not None else ""} for v in param_values]
+                    parameters = [{"type": "text", "text": str(v).rstrip('\n\r') if v is not None else ""} for v in param_values]
                 except Exception as e:
                     frappe.log_error(f"Error in template_data_script: {str(e)}", "WhatsApp Notification")
                     frappe.throw(_("Error in Template Data Script: {0}").format(str(e)))
@@ -211,9 +211,14 @@ class WhatsAppNotification(Document):
                                 except Exception:
                                     pass
                         
+                        # Strip trailing newlines and whitespace from value
+                        if value is not None:
+                            text_value = str(value).rstrip('\n\r').rstrip()
+                        else:
+                            text_value = ""
                         parameters.append({
                             "type": "text",
-                            "text": str(value) if value is not None else ""
+                            "text": text_value
                         })
                     except Exception as e:
                         frappe.log_error(f"Error processing field {getattr(field, 'field_name', 'unknown')}: {str(e)}", "WhatsApp Notification")
