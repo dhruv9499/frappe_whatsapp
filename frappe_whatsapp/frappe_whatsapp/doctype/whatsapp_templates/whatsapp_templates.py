@@ -4,8 +4,10 @@
 # For license information, please see license.txt
 import os
 import json
+import re
 import frappe
 import magic
+from frappe import _
 from frappe.model.document import Document
 from frappe.integrations.utils import make_post_request, make_request
 from frappe.desk.form.utils import get_pdf_link
@@ -25,15 +27,36 @@ class WhatsAppTemplates(Document):
             self.get_session_id()
             self.get_media_id()
 
+        # Check if template has parameters and validate sample_values
+        if self.template:
+            param_count = self.get_parameter_count()
+            if param_count > 0 and not self.sample_values:
+                frappe.throw(
+                    _("Sample Values is required when template has parameters ({{1}}, {{2}}, etc.). "
+                      "Please provide {0} comma-separated sample values matching your {0} parameters.").format(param_count),
+                    title=_("Sample Values Required")
+                )
+
         if not self.is_new():
             self.update_template()
+
+    def get_parameter_count(self):
+        """Count the number of parameters in the template ({{1}}, {{2}}, etc.)."""
+        if not self.template:
+            return 0
+        # Find all parameter placeholders like {{1}}, {{2}}, etc.
+        matches = re.findall(r'\{\{(\d+)\}\}', self.template)
+        if not matches:
+            return 0
+        # Return the highest parameter number found
+        return max(int(m) for m in matches)
 
     def set_whatsapp_account(self):
         """Set whatsapp account to default if missing"""
         if not self.whatsapp_account:
             default_whatsapp_account = get_whatsapp_account()
             if not default_whatsapp_account:
-                throw(_("Please set a default outgoing WhatsApp Account or Select available WhatsApp Account"))
+                frappe.throw(_("Please set a default outgoing WhatsApp Account or Select available WhatsApp Account"))
             else:
                 self.whatsapp_account = default_whatsapp_account.name
 
@@ -100,8 +123,19 @@ class WhatsAppTemplates(Document):
             "type": "BODY",
             "text": self.template,
         }
-        if self.sample_values:
-            body.update({"example": {"body_text": [self.sample_values.split(",")]}})
+        # WhatsApp API requires example field when template has parameters
+        param_count = self.get_parameter_count()
+        if param_count > 0:
+            if self.sample_values:
+                sample_list = [s.strip() for s in self.sample_values.split(",")]
+                # Ensure we have enough sample values
+                while len(sample_list) < param_count:
+                    sample_list.append("Sample")
+                body.update({"example": {"body_text": [sample_list[:param_count]]}})
+            else:
+                # Auto-generate sample values if missing (shouldn't happen due to validation)
+                sample_list = [f"Sample {i}" for i in range(1, param_count + 1)]
+                body.update({"example": {"body_text": [sample_list]}})
 
         data["components"].append(body)
         if self.header_type:
@@ -158,8 +192,19 @@ class WhatsAppTemplates(Document):
             "type": "BODY",
             "text": self.template,
         }
-        if self.sample_values:
-            body.update({"example": {"body_text": [self.sample_values.split(",")]}})
+        # WhatsApp API requires example field when template has parameters
+        param_count = self.get_parameter_count()
+        if param_count > 0:
+            if self.sample_values:
+                sample_list = [s.strip() for s in self.sample_values.split(",")]
+                # Ensure we have enough sample values
+                while len(sample_list) < param_count:
+                    sample_list.append("Sample")
+                body.update({"example": {"body_text": [sample_list[:param_count]]}})
+            else:
+                # Auto-generate sample values if missing (shouldn't happen due to validation)
+                sample_list = [f"Sample {i}" for i in range(1, param_count + 1)]
+                body.update({"example": {"body_text": [sample_list]}})
         data["components"].append(body)
         if self.header_type:
             data["components"].append(self.get_header())
