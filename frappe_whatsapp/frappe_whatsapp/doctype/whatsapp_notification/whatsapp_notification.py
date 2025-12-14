@@ -8,7 +8,11 @@ from frappe.model.document import Document
 from frappe.utils.safe_exec import get_safe_globals, safe_exec
 from frappe.integrations.utils import make_post_request
 from frappe.desk.form.utils import get_pdf_link
-from frappe.utils import add_to_date, nowdate, datetime
+from frappe.utils import (
+    add_to_date, nowdate, datetime,
+    format_date, format_time, format_datetime,
+    get_datetime, get_time, now_datetime, now
+)
 
 from frappe_whatsapp.utils import get_whatsapp_account
 
@@ -220,11 +224,50 @@ class WhatsAppNotification(Document):
                             # Evaluate Python expression
                             if not getattr(field, "expression", None):
                                 frappe.throw(_("Expression is required when Field Type is 'Expression'"))
-                            value = frappe.safe_eval(
-                                field.expression,
-                                get_safe_globals(),
-                                {"doc": doc, "frappe": frappe}
-                            )
+                            # Use safe_exec instead of safe_eval to allow frappe module access
+                            # Note: RestrictedPython doesn't allow variable names starting with "_"
+                            # Also, RestrictedPython blocks attribute access on modules, so we need to
+                            # create a utils object that contains commonly used functions
+                            # This allows expressions like frappe.utils.format_date(...) to work
+                            # Create a simple object using type() for attribute access
+                            UtilsObj = type('UtilsObj', (), {
+                                "format_date": format_date,
+                                "format_time": format_time,
+                                "format_datetime": format_datetime,
+                                "get_datetime": get_datetime,
+                                "get_time": get_time,
+                                "now_datetime": now_datetime,
+                                "now": now,
+                                "add_to_date": add_to_date,
+                            })
+                            utils_obj = UtilsObj()
+                            
+                            # Create frappe proxy object
+                            FrappeObj = type('FrappeObj', (), {
+                                "utils": utils_obj,
+                                "db": frappe.db,
+                                "get_doc": frappe.get_doc,
+                                "get_value": frappe.get_value,
+                                "get_list": frappe.get_list,
+                                "session": frappe.session,
+                            })
+                            frappe_obj = FrappeObj()
+                            
+                            _locals = {
+                                "doc": doc,
+                                "frappe": frappe_obj,
+                                "result": None,
+                                # Also add functions directly for convenience
+                                "format_date": format_date,
+                                "format_time": format_time,
+                                "format_datetime": format_datetime,
+                                "get_datetime": get_datetime,
+                                "get_time": get_time,
+                                "now_datetime": now_datetime,
+                                "now": now,
+                            }
+                            safe_exec(f"result = {field.expression}", get_safe_globals(), _locals)
+                            value = _locals.get("result")
                         else:
                             # Use dotted path resolution
                             field_name = getattr(field, "field_name", None)
@@ -252,7 +295,16 @@ class WhatsAppNotification(Document):
                             "text": sanitize_whatsapp_param(value)
                         })
                     except Exception as e:
-                        frappe.log_error(f"Error processing field {getattr(field, 'field_name', 'unknown')}: {str(e)}", "WhatsApp Notification")
+                        # Truncate error message to prevent CharacterLengthExceededError (max 140 chars for Title)
+                        field_identifier = getattr(field, 'field_name', None) or getattr(field, 'expression', 'unknown')
+                        # Truncate field_identifier if too long (expressions can be very long)
+                        if len(field_identifier) > 30:
+                            field_identifier = field_identifier[:27] + "..."
+                        error_msg = str(e)
+                        # Limit error message to ~80 chars to leave room for prefix (~60 chars including field_identifier)
+                        if len(error_msg) > 80:
+                            error_msg = error_msg[:77] + "..."
+                        frappe.log_error(f"Error processing field {field_identifier}: {error_msg}", "WhatsApp Notification")
                         parameters.append({
                             "type": "text",
                             "text": "-"
