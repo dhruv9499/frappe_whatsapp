@@ -109,7 +109,13 @@ class WhatsAppMessage(Document):
         }
 
         if template.sample_values:
-            field_names = template.field_names.split(",") if template.field_names else template.sample_values.split(",")
+            # Use smart parser for field_names (supports JSON, pipe, comma)
+            # This handles cases where field values contain commas (e.g., dates)
+            if template.field_names:
+                field_names = template._parse_sample_values(template.field_names)
+            else:
+                # Fallback to sample_values parsing
+                field_names = template._parse_sample_values(template.sample_values)
             parameters = []
             template_parameters = []
 

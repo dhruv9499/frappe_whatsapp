@@ -112,6 +112,7 @@
    "label": "Sample"
   },
   {
+   "description": "Sample values for template parameters. Formats: JSON array [\"Value 1\", \"Value 2\"], pipe-separated (Value 1|Value 2), or comma-separated (Value 1, Value 2). Use JSON or pipe format if values contain commas (e.g., dates). Character limits: Body params ~1000 chars, Header params 60 chars.",
    "fieldname": "sample_values",
    "fieldtype": "Small Text",
    "label": "Sample Values"
@@ -145,7 +146,7 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Field names to replace the value in templates",
+   "description": "Field names to replace the value in templates. Formats: JSON array [\"field1\", \"field2\"], pipe-separated (field1|field2), or comma-separated (field1, field2). Use JSON or pipe format if field values contain commas.",
    "fieldname": "field_names",
    "fieldtype": "Small Text",
    "label": "Field names"

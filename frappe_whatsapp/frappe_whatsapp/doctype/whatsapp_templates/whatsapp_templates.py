@@ -43,6 +43,44 @@ class WhatsAppTemplates(Document):
             self.get_session_id()
             self.get_media_id()
 
+        # Validate template body character limits
+        if self.template:
+            template_len = len(self.template)
+            # WhatsApp body limit: 550 chars for Marketing/Utility templates, 1024 chars if header/footer present
+            BODY_LIMIT = 1024 if (self.header_type or self.footer) else 550
+            if template_len > BODY_LIMIT:
+                frappe.throw(
+                    _("Template body exceeds WhatsApp limit of {0} characters. Current length: {1}. "
+                      "Limit is {0} chars when header/footer present, 550 chars for body-only templates.").format(
+                        BODY_LIMIT, template_len
+                    ),
+                    title=_("Character Limit Exceeded")
+                )
+
+        # Validate header character limits
+        if self.header_type == "TEXT" and self.header:
+            header_len = len(self.header)
+            HEADER_LIMIT = 60
+            if header_len > HEADER_LIMIT:
+                frappe.throw(
+                    _("Header text exceeds WhatsApp limit of {0} characters. Current length: {1}.").format(
+                        HEADER_LIMIT, header_len
+                    ),
+                    title=_("Character Limit Exceeded")
+                )
+
+        # Validate footer character limits
+        if self.footer:
+            footer_len = len(self.footer)
+            FOOTER_LIMIT = 60
+            if footer_len > FOOTER_LIMIT:
+                frappe.throw(
+                    _("Footer text exceeds WhatsApp limit of {0} characters. Current length: {1}.").format(
+                        FOOTER_LIMIT, footer_len
+                    ),
+                    title=_("Character Limit Exceeded")
+                )
+
         # Check if template has parameters and validate sample_values
         if self.template:
             param_count = self.get_parameter_count()
@@ -50,17 +88,19 @@ class WhatsAppTemplates(Document):
                 if not self.sample_values:
                     frappe.throw(
                         _("Sample Values is required when template has parameters ({{1}}, {{2}}, etc.). "
-                          "Please provide {0} comma-separated sample values matching your {0} parameters.").format(param_count),
+                          "Please provide {0} sample values matching your {0} parameters. "
+                          "Format: JSON array (e.g., [\"Value 1\", \"Value 2\"]), pipe-separated (Value 1|Value 2), or comma-separated (Value 1, Value 2). "
+                          "Note: Use JSON or pipe format if values contain commas.").format(param_count),
                         title=_("Sample Values Required")
                     )
                 else:
-                    # Validate that sample_values count matches parameter count
-                    sample_list = [s.strip() for s in self.sample_values.split(",") if s.strip()]
+                    # Parse sample_values - try JSON first, then pipe, then comma
+                    sample_list = self._parse_sample_values(self.sample_values, param_count)
                     if len(sample_list) != param_count:
                         frappe.throw(
                             _("Sample Values count ({0}) does not match template parameter count ({1}). "
-                              "Please provide exactly {1} comma-separated values. "
-                              "Note: If your dates contain commas (e.g., 'Jan 15, 2024'), consider using a different format or separator.").format(
+                              "Please provide exactly {1} values. "
+                              "Formats: JSON array [\"val1\", \"val2\"], pipe-separated (val1|val2), or comma-separated (val1, val2).").format(
                                 len(sample_list), param_count
                             ),
                             title=_("Sample Values Mismatch")
@@ -114,6 +154,85 @@ class WhatsAppTemplates(Document):
             return 0
         # Return the highest parameter number found
         return max(int(m) for m in matches)
+
+    def _parse_sample_values(self, sample_values_str, expected_count=None):
+        """Parse sample_values string into a list.
+        
+        Supports multiple formats:
+        1. JSON array: ["Value 1", "Value 2, with comma", "Value 3"]
+        2. Pipe-separated: Value 1|Value 2, with comma|Value 3
+        3. Comma-separated: Value 1, Value 2, Value 3 (breaks if values contain commas)
+        
+        Args:
+            sample_values_str: The sample_values string
+            expected_count: Optional expected count for validation
+            
+        Returns:
+            List of sample value strings
+        """
+        if not sample_values_str or not sample_values_str.strip():
+            return []
+        
+        sample_values_str = sample_values_str.strip()
+        
+        # Try JSON array format first (most robust)
+        if sample_values_str.startswith("[") and sample_values_str.endswith("]"):
+            try:
+                parsed = json.loads(sample_values_str)
+                if isinstance(parsed, list):
+                    return [str(v).strip() for v in parsed if str(v).strip()]
+            except (json.JSONDecodeError, ValueError):
+                pass
+        
+        # Try pipe-separated format (good for values with commas)
+        if "|" in sample_values_str:
+            sample_list = [s.strip() for s in sample_values_str.split("|") if s.strip()]
+            if expected_count is None or len(sample_list) == expected_count:
+                return sample_list
+        
+        # Fall back to comma-separated (default, but breaks if values contain commas)
+        sample_list = [s.strip() for s in sample_values_str.split(",") if s.strip()]
+        return sample_list
+
+    def _validate_sample_value_lengths(self, sample_list):
+        """Validate that sample values don't exceed WhatsApp character limits.
+        
+        WhatsApp limits:
+        - Body parameter: 32768 chars (if body-only template), ~1024 chars (if header/footer present)
+        - Header parameter: 60 chars
+        - Footer: 60 chars (no parameters allowed)
+        
+        For template creation, we validate against stricter limits to ensure approval.
+        """
+        # WhatsApp body parameter limit for templates (conservative limit for approval)
+        BODY_PARAM_LIMIT = 1000  # Conservative limit for template approval
+        HEADER_PARAM_LIMIT = 60
+        
+        for idx, value in enumerate(sample_list, start=1):
+            value_len = len(value)
+            
+            # Check if this parameter is used in header
+            header_has_param = self.header_type == "TEXT" and self.header and f"{{{{{idx}}}}}" in self.header
+            
+            if header_has_param:
+                if value_len > HEADER_PARAM_LIMIT:
+                    frappe.throw(
+                        _("Sample value #{0} exceeds WhatsApp header parameter limit of {1} characters. "
+                          "Current length: {2}. Value: '{3}'").format(
+                            idx, HEADER_PARAM_LIMIT, value_len, value[:50] + "..." if value_len > 50 else value
+                        ),
+                        title=_("Character Limit Exceeded")
+                    )
+            else:
+                # Body parameter
+                if value_len > BODY_PARAM_LIMIT:
+                    frappe.throw(
+                        _("Sample value #{0} exceeds WhatsApp body parameter limit of {1} characters. "
+                          "Current length: {2}. Value: '{3}'").format(
+                            idx, BODY_PARAM_LIMIT, value_len, value[:50] + "..." if value_len > 50 else value
+                        ),
+                        title=_("Character Limit Exceeded")
+                    )
 
     def set_whatsapp_account(self):
         """Set whatsapp account to default if missing"""
@@ -172,6 +291,16 @@ class WhatsAppTemplates(Document):
 
 
     def after_insert(self):
+        # Skip WhatsApp API call if flag is set (for fixtures/data import)
+        if getattr(frappe.flags, 'skip_whatsapp_api', False):
+            return
+        
+        # Skip if template already has an ID (imported from another system)
+        if self.id:
+            # Template was imported with existing WhatsApp ID, just sync status
+            self._sync_existing_template()
+            return
+
         if self.template_name:
             # Use sanitized name if not already set
             if not self.actual_name:
@@ -181,6 +310,14 @@ class WhatsAppTemplates(Document):
                 self.actual_name = self.sanitize_template_name(self.actual_name)
 
         self.get_settings()
+        
+        # Check if template already exists on WhatsApp before creating
+        existing_template = self._check_template_exists_on_whatsapp()
+        if existing_template:
+            # Template exists on WhatsApp, sync it instead of creating
+            self._sync_from_whatsapp_template(existing_template)
+            return
+
         data = {
             "name": self.actual_name,
             "language": self.language_code,
@@ -200,17 +337,19 @@ class WhatsAppTemplates(Document):
         param_count = self.get_parameter_count()
         if param_count > 0:
             if self.sample_values:
-                # Split by comma and strip whitespace, filter out empty values
-                sample_list = [s.strip() for s in self.sample_values.split(",") if s.strip()]
-                # Validation should have caught count mismatch, but double-check here
+                # Parse sample_values using smart parser (supports JSON, pipe, comma)
+                sample_list = self._parse_sample_values(self.sample_values, param_count)
+                # Validate count matches
                 if len(sample_list) != param_count:
                     frappe.throw(
                         _("Sample Values count ({0}) does not match template parameter count ({1}). "
-                          "Please provide exactly {1} comma-separated values.").format(
+                          "Please provide exactly {1} values.").format(
                             len(sample_list), param_count
                         ),
                         title=_("Sample Values Mismatch")
                     )
+                # Validate character limits for each sample value
+                self._validate_sample_value_lengths(sample_list)
                 body.update({"example": {"body_text": [sample_list]}})
             else:
                 # Auto-generate sample values if missing (shouldn't happen due to validation)
@@ -263,6 +402,70 @@ class WhatsAppTemplates(Document):
                 title=res.get("error_user_title", "Error"),
             )
 
+    def _check_template_exists_on_whatsapp(self):
+        """Check if template with same name and language already exists on WhatsApp."""
+        try:
+            response = make_request(
+                "GET",
+                f"{self._url}/{self._version}/{self._business_id}/message_templates?name={self.actual_name}",
+                headers=self._headers,
+            )
+            
+            for template in response.get("data", []):
+                # Match by name and language
+                if template.get("name") == self.actual_name and template.get("language") == self.language_code:
+                    return template
+            return None
+        except Exception:
+            # If check fails, proceed with creation attempt
+            return None
+
+    def _sync_from_whatsapp_template(self, template):
+        """Sync local doc from existing WhatsApp template."""
+        self.id = template.get("id")
+        self.status = template.get("status", "PENDING")
+        
+        frappe.msgprint(
+            _("Template '{0}' already exists on WhatsApp with status '{1}'. Synced local record.").format(
+                self.actual_name, self.status
+            ),
+            alert=True,
+            indicator="blue"
+        )
+        self.db_update()
+
+    def _sync_existing_template(self):
+        """Sync status for template that was imported with existing ID."""
+        try:
+            self.get_settings()
+            response = make_request(
+                "GET",
+                f"{self._url}/{self._version}/{self._business_id}/message_templates?name={self.actual_name}",
+                headers=self._headers,
+            )
+            
+            for template in response.get("data", []):
+                if template.get("id") == self.id or template.get("name") == self.actual_name:
+                    self.status = template.get("status", self.status)
+                    self.db_update()
+                    frappe.msgprint(
+                        _("Template synced from WhatsApp. Status: {0}").format(self.status),
+                        alert=True,
+                        indicator="blue"
+                    )
+                    return
+            
+            # Template not found on WhatsApp - might be deleted or different account
+            frappe.msgprint(
+                _("Template '{0}' not found on WhatsApp. It may have been deleted or belongs to a different account.").format(
+                    self.actual_name
+                ),
+                alert=True,
+                indicator="orange"
+            )
+        except Exception as e:
+            frappe.log_error(f"Failed to sync template: {str(e)}", "WhatsApp Template Sync")
+
     def update_template(self):
         """Update template to meta."""
         self.get_settings()
@@ -280,8 +483,8 @@ class WhatsAppTemplates(Document):
         param_count = self.get_parameter_count()
         if param_count > 0:
             if self.sample_values:
-                # Split by comma and strip whitespace, filter out empty values
-                sample_list = [s.strip() for s in self.sample_values.split(",") if s.strip()]
+                # Parse sample_values using smart parser (supports JSON, pipe, comma)
+                sample_list = self._parse_sample_values(self.sample_values, param_count)
                 # Ensure we have exactly the right number of sample values
                 if len(sample_list) < param_count:
                     # Pad with "Sample" if not enough values
