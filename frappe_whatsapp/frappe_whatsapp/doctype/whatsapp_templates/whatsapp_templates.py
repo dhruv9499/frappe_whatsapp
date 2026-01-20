@@ -44,15 +44,29 @@ class WhatsAppTemplates(Document):
             self.get_media_id()
 
         # Validate template body character limits
+        # WhatsApp limits (as of March 2025):
+        # - MARKETING and UTILITY templates: 550 characters
+        # - AUTHENTICATION templates: 1024 characters
+        # - TRANSACTIONAL and OTP are legacy categories (treated as UTILITY/AUTHENTICATION)
         if self.template:
             template_len = len(self.template)
-            # WhatsApp body limit: 550 chars for Marketing/Utility templates, 1024 chars if header/footer present
-            BODY_LIMIT = 1024 if (self.header_type or self.footer) else 550
+            # Determine limit based on category
+            if self.category in ["AUTHENTICATION", "OTP"]:
+                BODY_LIMIT = 1024
+                category_desc = "AUTHENTICATION"
+            elif self.category in ["MARKETING", "UTILITY", "TRANSACTIONAL"]:
+                BODY_LIMIT = 550
+                category_desc = f"{self.category} (or UTILITY/TRANSACTIONAL)"
+            else:
+                # Default to stricter limit if category not set
+                BODY_LIMIT = 550
+                category_desc = "MARKETING/UTILITY"
+            
             if template_len > BODY_LIMIT:
                 frappe.throw(
-                    _("Template body exceeds WhatsApp limit of {0} characters. Current length: {1}. "
-                      "Limit is {0} chars when header/footer present, 550 chars for body-only templates.").format(
-                        BODY_LIMIT, template_len
+                    _("Template body exceeds WhatsApp limit of {0} characters for {1} templates. Current length: {2}. "
+                      "Limit is {0} chars for {1} templates.").format(
+                        BODY_LIMIT, category_desc, template_len
                     ),
                     title=_("Character Limit Exceeded")
                 )
@@ -330,7 +344,7 @@ class WhatsAppTemplates(Document):
         template_text = template_text.rstrip('\n\r')
         
         body = {
-            "type": "BODY",
+            "type": "body",
             "text": template_text,
         }
         # WhatsApp API requires example field when template has parameters
@@ -362,11 +376,11 @@ class WhatsAppTemplates(Document):
 
         # add footer
         if self.footer:
-            data["components"].append({"type": "FOOTER", "text": self.footer})
+            data["components"].append({"type": "footer", "text": self.footer})
 
         # add buttons
         if self.buttons:
-            button_block = {"type": "BUTTONS", "buttons": []}
+            button_block = {"type": "buttons", "buttons": []}
             for btn in self.buttons:
                 b = {"type": btn.button_type, "text": btn.button_label}
 
@@ -395,11 +409,48 @@ class WhatsAppTemplates(Document):
             self.status = response["status"]
             self.db_update()
         except Exception as e:
-            res = frappe.flags.integration_request.json().get("error", {})
-            error_message = res.get("error_user_msg", res.get("message"))
+            # Get full error response for debugging
+            error_details = {}
+            error_message = str(e)
+            error_title = "Error"
+            
+            # Try to get error from integration_request flag (set by make_request before raise_for_status)
+            if hasattr(frappe.flags, 'integration_request') and frappe.flags.integration_request:
+                try:
+                    error_response = frappe.flags.integration_request.json()
+                    error_details = error_response.get("error", {})
+                    error_message = error_details.get("error_user_msg") or error_details.get("message") or error_message
+                    error_title = error_details.get("error_user_title", "Error")
+                    
+                    # Log full error for debugging
+                    frappe.log_error(
+                        f"WhatsApp Template Creation Error:\nRequest Data: {json.dumps(data, indent=2)}\n\nAPI Response: {json.dumps(error_response, indent=2)}",
+                        "WhatsApp Template API Error"
+                    )
+                except Exception as parse_error:
+                    # If JSON parsing fails, try to get text response
+                    try:
+                        error_text = frappe.flags.integration_request.text
+                        frappe.log_error(
+                            f"WhatsApp Template Creation Error (text response):\nRequest Data: {json.dumps(data, indent=2)}\n\nAPI Response Text: {error_text}\nParse Error: {str(parse_error)}",
+                            "WhatsApp Template API Error"
+                        )
+                        error_message = f"{error_message}\n\nAPI Response: {error_text[:500]}"
+                    except Exception:
+                        frappe.log_error(
+                            f"Error accessing API response: {str(parse_error)}\nOriginal error: {str(e)}\nRequest Data: {json.dumps(data, indent=2)}",
+                            "WhatsApp Template API Error"
+                        )
+            else:
+                # If integration_request is not available, log the exception
+                frappe.log_error(
+                    f"WhatsApp Template Creation Error (no integration_request): {str(e)}\nRequest Data: {json.dumps(data, indent=2)}",
+                    "WhatsApp Template API Error"
+                )
+            
             frappe.throw(
                 msg=error_message,
-                title=res.get("error_user_title", "Error"),
+                title=error_title,
             )
 
     def _check_template_exists_on_whatsapp(self):
@@ -476,7 +527,7 @@ class WhatsAppTemplates(Document):
         template_text = template_text.rstrip('\n\r')
         
         body = {
-            "type": "BODY",
+            "type": "body",
             "text": template_text,
         }
         # WhatsApp API requires example field when template has parameters
@@ -501,9 +552,9 @@ class WhatsAppTemplates(Document):
         if self.header_type:
             data["components"].append(self.get_header())
         if self.footer:
-            data["components"].append({"type": "FOOTER", "text": self.footer})
+            data["components"].append({"type": "footer", "text": self.footer})
         if self.buttons:
-            button_block = {"type": "BUTTONS", "buttons": []}
+            button_block = {"type": "buttons", "buttons": []}
             for btn in self.buttons:
                 b = {"type": btn.button_type, "text": btn.button_label}
 
