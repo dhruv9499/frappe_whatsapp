@@ -44,28 +44,32 @@ class WhatsAppTemplates(Document):
             self.get_media_id()
 
         # Validate template body character limits
-        # WhatsApp limits (as of March 2025):
-        # - MARKETING and UTILITY templates: 550 characters
-        # - AUTHENTICATION templates: 1024 characters
-        # - TRANSACTIONAL and OTP are legacy categories (treated as UTILITY/AUTHENTICATION)
+        # WhatsApp limits:
+        # - Standard templates (no media header): 4096 characters
+        # - Media templates (with IMAGE/VIDEO/DOCUMENT header): 1024 characters
+        # - Authentication templates: 1024 characters
+        # Note: During template approval, all templates are validated against 1024 char limit
+        #       but actual sending allows up to 4096 for non-media templates
         if self.template:
             template_len = len(self.template)
-            # Determine limit based on category
+            # Determine limit based on header type and category
+            # Media templates (IMAGE, VIDEO, DOCUMENT) have stricter 1024 limit
+            # Authentication templates also have 1024 limit
+            # Standard templates (TEXT header or no header) allow up to 4096
             if self.category in ["AUTHENTICATION", "OTP"]:
                 BODY_LIMIT = 1024
                 category_desc = "AUTHENTICATION"
-            elif self.category in ["MARKETING", "UTILITY", "TRANSACTIONAL"]:
-                BODY_LIMIT = 550
-                category_desc = f"{self.category} (or UTILITY/TRANSACTIONAL)"
+            elif self.header_type in ["IMAGE", "VIDEO", "DOCUMENT"]:
+                BODY_LIMIT = 1024
+                category_desc = "media (IMAGE/VIDEO/DOCUMENT header)"
             else:
-                # Default to stricter limit if category not set
-                BODY_LIMIT = 550
-                category_desc = "MARKETING/UTILITY"
+                # Standard templates (TEXT header or no header) - MARKETING, UTILITY, etc.
+                BODY_LIMIT = 4096
+                category_desc = self.category or "standard"
             
             if template_len > BODY_LIMIT:
                 frappe.throw(
-                    _("Template body exceeds WhatsApp limit of {0} characters for {1} templates. Current length: {2}. "
-                      "Limit is {0} chars for {1} templates.").format(
+                    _("Template body exceeds WhatsApp limit of {0} characters for {1} templates. Current length: {2}.").format(
                         BODY_LIMIT, category_desc, template_len
                     ),
                     title=_("Character Limit Exceeded")
